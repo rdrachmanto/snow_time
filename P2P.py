@@ -249,9 +249,11 @@ class UpBlock(nn.Module):
                 nn.ReLU(inplace=True)
             )
 
-    def forward(self, x, skip):
+    # Originally there is a "skip" param here
+    def forward(self, x):
         # x: incoming feature from the previous layer (bottleneck or previous upblock)
-        x = torch.cat([x, skip], dim=1)  # shape: [B, in_channels, H, W]
+        # x = torch.cat([x, skip], dim=1)  # shape: [B, in_channels, H, W]
+        x = torch.cat([x], dim=1)  # shape: [B, in_channels, H, W]
 
         # 2) Up-sample
         x = self.up_transpose(x)  # shape: [B, out_channels, 2H, 2W]
@@ -277,18 +279,19 @@ class EnhancedGeneratorUNet(nn.Module):
         self.down4 = DownBlock(256, 512, use_edge_enhance=True)
 
         # Bottleneck: Spatial Transformer
-        self.spatial_transform = SpatialTransformer(in_channels=512)
+        # self.spatial_transform = SpatialTransformer(in_channels=512)
 
 
         # For skip connections, each UpBlock will see (prev out + skip)
         # So up1 in_channels = 512 (bottleneck) + 512 (skip from down4) => 1024
-        self.up1 = UpBlock(in_channels=512 + 512, out_channels=256)
+        # self.up1 = UpBlock(in_channels=512 + 512, out_channels=256)
+        self.up1 = UpBlock(in_channels=512, out_channels=256)
         # up2 in_channels = 256 + 256 => 512
-        self.up2 = UpBlock(in_channels=256 + 256, out_channels=128)
+        self.up2 = UpBlock(in_channels=256, out_channels=128)
         # up3 in_channels = 128 + 128 => 256
-        self.up3 = UpBlock(in_channels=128 + 128, out_channels=64)
+        self.up3 = UpBlock(in_channels=128, out_channels=64)
         # up4 in_channels = 64 + 64 => 128
-        self.up4_transpose = nn.ConvTranspose2d(64 + 64, 3, kernel_size=4, stride=2, padding=1)
+        self.up4_transpose = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
 
         # Final activation
         self.final_act = nn.Tanh()
@@ -301,25 +304,24 @@ class EnhancedGeneratorUNet(nn.Module):
         d4 = self.down4(d3)  # [B, 512, H/16,  W/16]
 
         # Bottleneck transform
-        bt = self.spatial_transform(d4)  # [B, 512, H/16, W/16] (warped)
+        # bt = self.spatial_transform(d4)  # [B, 512, H/16, W/16] (warped)
 
         # 1) UpBlock
-        x = self.up1(bt, d4)  # [B, 256, H/8,   W/8]
+        # x = self.up1(bt, d4)  # [B, 256, H/8,   W/8]
+        x = self.up1(d4)  # [B, 256, H/8,   W/8]
         # 2) UpBlock
-        x = self.up2(x, d3)  # [B, 128, H/4,   W/4]
+        # x = self.up2(x, d3)  # [B, 128, H/4,   W/4]
+        x = self.up2(d3)  # [B, 128, H/4,   W/4]
         # 3) UpBlock
-        x = self.up3(x, d2)  # [B,  64, H/2,   W/2]
+        x = self.up3(d2)  # [B,  64, H/2,   W/2]
 
         # 4) Final up (no separate block here, but we do skip connect with d1)
-        x = torch.cat([x, d1], dim=1)  # [B, 64+64=128, H/2, W/2]
+        # x = torch.cat([x, d1], dim=1)  # [B, 64+64=128, H/2, W/2]
+        x = torch.cat([x], dim=1)  # [B, 64+64=128, H/2, W/2]
         x = self.up4_transpose(x)  # [B, 3, H, W]
 
         x = self.final_act(x)  # Range -> [-1, 1]
         return x
-
-
-
-
 
 
 # Initialize models, optimizers, and loss function
