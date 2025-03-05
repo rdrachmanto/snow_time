@@ -11,17 +11,17 @@ import torch.nn.functional as F
 
 # Parameters
 IMAGE_SIZE = 512
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 EPOCHS = 100
 LR = 0.0002
 BETA1 = 0.5
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Paths
-train_dir = '/data/rdr78068/snow_classifier/snow_time/data2/train'
-val_dir = '/data/rdr78068/snow_classifier/snow_time/data2/val'
-test_dir = '/data/rdr78068/snow_classifier/snow_time/data2/test'
-checkpoint_dir = 'checkpoints'
+train_dir = 'cswv_s6/train'
+val_dir = 'cswv_s6/val'
+test_dir = 'cswv_s6/test'
+checkpoint_dir = 'checkpoints/enhancedgen_s6'
 
 # Ensure checkpoint directory exists
 os.makedirs(checkpoint_dir, exist_ok=True)
@@ -185,8 +185,14 @@ class SpatialTransformer(nn.Module):
     def forward(self, x):
         # x shape: [B, C, H, W]
         # input dependent
+        print(f"x: {x.shape}")
+        
         xs = self.localization(x)
+        print(f"xs: {xs.shape}")
+        
         xs = xs.view(xs.size(0), -1)
+        print(f"xs after flattening: {xs.shape}")
+        
         theta = self.fc_loc(xs)
         theta = theta.view(-1, 2, 3)  # [B, 2, 3]
 
@@ -250,10 +256,10 @@ class UpBlock(nn.Module):
             )
 
     # Originally there is a "skip" param here
-    def forward(self, x):
+    def forward(self, x, skip):
         # x: incoming feature from the previous layer (bottleneck or previous upblock)
-        # x = torch.cat([x, skip], dim=1)  # shape: [B, in_channels, H, W]
-        x = torch.cat([x], dim=1)  # shape: [B, in_channels, H, W]
+        x = torch.cat([x, skip], dim=1)
+        # x = torch.cat([x], dim=1)  # shape: [B, in_channels, H, W]
 
         # 2) Up-sample
         x = self.up_transpose(x)  # shape: [B, out_channels, 2H, 2W]
@@ -280,18 +286,23 @@ class EnhancedGeneratorUNet(nn.Module):
 
         # Bottleneck: Spatial Transformer
         # self.spatial_transform = SpatialTransformer(in_channels=512)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
 
 
         # For skip connections, each UpBlock will see (prev out + skip)
         # So up1 in_channels = 512 (bottleneck) + 512 (skip from down4) => 1024
-        # self.up1 = UpBlock(in_channels=512 + 512, out_channels=256)
-        self.up1 = UpBlock(in_channels=512, out_channels=256)
+        self.up1 = UpBlock(in_channels=512 + 512, out_channels=256)
         # up2 in_channels = 256 + 256 => 512
-        self.up2 = UpBlock(in_channels=256, out_channels=128)
+        self.up2 = UpBlock(in_channels=256 + 256, out_channels=128)
         # up3 in_channels = 128 + 128 => 256
-        self.up3 = UpBlock(in_channels=128, out_channels=64)
+        self.up3 = UpBlock(in_channels=128 + 128, out_channels=64)
         # up4 in_channels = 64 + 64 => 128
-        self.up4_transpose = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
+        self.up4_transpose = nn.ConvTranspose2d(64 + 64, 3, kernel_size=4, stride=2, padding=1)
 
         # Final activation
         self.final_act = nn.Tanh()
@@ -302,22 +313,19 @@ class EnhancedGeneratorUNet(nn.Module):
         d2 = self.down2(d1)  # [B, 128, H/4,   W/4]
         d3 = self.down3(d2)  # [B, 256, H/8,   W/8]
         d4 = self.down4(d3)  # [B, 512, H/16,  W/16]
-
+        
         # Bottleneck transform
-        # bt = self.spatial_transform(d4)  # [B, 512, H/16, W/16] (warped)
+        bt = self.bottleneck(d4)
 
         # 1) UpBlock
-        # x = self.up1(bt, d4)  # [B, 256, H/8,   W/8]
-        x = self.up1(d4)  # [B, 256, H/8,   W/8]
+        x = self.up1(bt, d4)  # [B, 256, H/8,   W/8]
         # 2) UpBlock
-        # x = self.up2(x, d3)  # [B, 128, H/4,   W/4]
-        x = self.up2(d3)  # [B, 128, H/4,   W/4]
+        x = self.up2(x, d3)  # [B, 128, H/4,   W/4]
         # 3) UpBlock
-        x = self.up3(d2)  # [B,  64, H/2,   W/2]
+        x = self.up3(x, d2)  # [B,  64, H/2,   W/2]
 
         # 4) Final up (no separate block here, but we do skip connect with d1)
-        # x = torch.cat([x, d1], dim=1)  # [B, 64+64=128, H/2, W/2]
-        x = torch.cat([x], dim=1)  # [B, 64+64=128, H/2, W/2]
+        x = torch.cat([x, d1], dim=1)  # [B, 64+64=128, H/2, W/2]
         x = self.up4_transpose(x)  # [B, 3, H, W]
 
         x = self.final_act(x)  # Range -> [-1, 1]
@@ -325,8 +333,8 @@ class EnhancedGeneratorUNet(nn.Module):
 
 
 # Initialize models, optimizers, and loss function
+# generator = EnhancedGeneratorUNet().to(DEVICE)
 generator = EnhancedGeneratorUNet().to(DEVICE)
-# generator = GeneratorUNet().to(DEVICE)
 discriminator = Discriminator().to(DEVICE)
 optimizer_G = optim.Adam(generator.parameters(), lr=LR, betas=(BETA1, 0.999))
 optimizer_D = optim.Adam(discriminator.parameters(), lr=LR, betas=(BETA1, 0.999))
@@ -342,6 +350,10 @@ def train():
 
         for i, (input_image, target_image) in enumerate(tqdm(train_loader)):
             input_image, target_image = input_image.to(DEVICE), target_image.to(DEVICE)
+
+            # Keeps only RGB
+            input_image = input_image[:, :3, :, :]
+            target_image = target_image[:, :3, :, :]
 
             # Get output shape from the discriminator
             output_shape = discriminator(input_image, target_image).shape[2:]
