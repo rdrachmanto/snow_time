@@ -22,9 +22,9 @@ BATCH_SIZE = 1
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Paths
-test_dir = '/home/myid/dc41937/snow_time/data2/train'
-checkpoint_path = '/home/myid/dc41937/snow_time/checkpoints/generator_epoch_99.pth'  # Replace with the correct checkpoint
-output_dir = '/home/myid/dc41937/snow_time/train_results'
+test_dir = './cswv_s6/test'
+checkpoint_path = './checkpoints/enhancedgen_s6/generator_epoch_99.pth'  # Replace with the correct checkpoint
+output_dir = './../enhancedgen_s6_results'
 
 # Ensure output directory exists
 os.makedirs(output_dir, exist_ok=True)
@@ -63,27 +63,44 @@ test_dataset = CloudSnowDataset(test_dir, transform=transform)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 
-# Generator model (reuse from training script)
-# class GeneratorUNet(nn.Module):
-#     def __init__(self):
-#         super(GeneratorUNet, self).__init__()
-#         self.encoder = nn.Sequential(
-#             nn.Conv2d(3, 64, 4, 2, 1), nn.LeakyReLU(0.2),
-#             nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2),
-#             nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2),
-#             nn.Conv2d(256, 512, 4, 2, 1), nn.BatchNorm2d(512), nn.LeakyReLU(0.2),
-#         )
-#         self.decoder = nn.Sequential(
-#             nn.ConvTranspose2d(512, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(),
-#             nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(),
-#             nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(),
-#             nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Tanh(),
-#         )
-#
-#     def forward(self, x):
-#         x = self.encoder(x)
-#         x = self.decoder(x)
-#         return x
+# Generator
+class GeneratorUNet(nn.Module):
+    def __init__(self):
+        super(GeneratorUNet, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 64, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2),
+            nn.Conv2d(256, 512, 4, 2, 1), nn.BatchNorm2d(512), nn.LeakyReLU(0.2),
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(512, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Tanh(),
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+
+# Discriminator
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(6, 64, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2),
+            nn.Conv2d(256, 512, 4, 1, 1), nn.BatchNorm2d(512), nn.LeakyReLU(0.2),
+            nn.Conv2d(512, 1, 4, 1, 1), nn.Sigmoid()
+        )
+
+    def forward(self, x, y):
+        input = torch.cat([x, y], dim=1)
+        return self.model(input)
 
 class EdgeEnhancedConv(nn.Module):
     def __init__(self, in_channels, out_channels,
@@ -169,8 +186,14 @@ class SpatialTransformer(nn.Module):
     def forward(self, x):
         # x shape: [B, C, H, W]
         # input dependent
+        print(f"x: {x.shape}")
+        
         xs = self.localization(x)
+        print(f"xs: {xs.shape}")
+        
         xs = xs.view(xs.size(0), -1)
+        print(f"xs after flattening: {xs.shape}")
+        
         theta = self.fc_loc(xs)
         theta = theta.view(-1, 2, 3)  # [B, 2, 3]
 
@@ -233,9 +256,11 @@ class UpBlock(nn.Module):
                 nn.ReLU(inplace=True)
             )
 
+    # Originally there is a "skip" param here
     def forward(self, x, skip):
         # x: incoming feature from the previous layer (bottleneck or previous upblock)
-        x = torch.cat([x, skip], dim=1)  # shape: [B, in_channels, H, W]
+        x = torch.cat([x, skip], dim=1)
+        # x = torch.cat([x], dim=1)  # shape: [B, in_channels, H, W]
 
         # 2) Up-sample
         x = self.up_transpose(x)  # shape: [B, out_channels, 2H, 2W]
@@ -255,16 +280,22 @@ class EnhancedGeneratorUNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-
         self.down1 = DownBlock(3, 64, use_edge_enhance=True, apply_batchnorm=False)  # first layer often no BN
         self.down2 = DownBlock(64, 128, use_edge_enhance=True)
         self.down3 = DownBlock(128, 256, use_edge_enhance=True)
         self.down4 = DownBlock(256, 512, use_edge_enhance=True)
 
         # Bottleneck: Spatial Transformer
-        self.spatial_transform = SpatialTransformer(in_channels=512)
+        # self.spatial_transform = SpatialTransformer(in_channels=512)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
 
 
+        # For skip connections, each UpBlock will see (prev out + skip)
         # So up1 in_channels = 512 (bottleneck) + 512 (skip from down4) => 1024
         self.up1 = UpBlock(in_channels=512 + 512, out_channels=256)
         # up2 in_channels = 256 + 256 => 512
@@ -283,10 +314,9 @@ class EnhancedGeneratorUNet(nn.Module):
         d2 = self.down2(d1)  # [B, 128, H/4,   W/4]
         d3 = self.down3(d2)  # [B, 256, H/8,   W/8]
         d4 = self.down4(d3)  # [B, 512, H/16,  W/16]
-
+        
         # Bottleneck transform
-        bt = self.spatial_transform(d4)  # [B, 512, H/16, W/16] (warped)
-
+        bt = self.bottleneck(d4)
 
         # 1) UpBlock
         x = self.up1(bt, d4)  # [B, 256, H/8,   W/8]
